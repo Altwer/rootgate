@@ -66,6 +66,29 @@ pub fn peer_hung_up<F: AsRawFd>(s: &F) -> bool {
     rc > 0 && (pfd.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
 }
 
+/// Only accept traffic that arrived on interface `dev` (SO_BINDTODEVICE).
+/// Packets for the listening address that come in over any other interface
+/// (e.g. Wi-Fi with an overlapping 100.64.0.0/10 address) never reach us.
+pub fn bind_to_device<F: AsRawFd>(s: &F, dev: &str) -> io::Result<()> {
+    if dev.is_empty() || dev.len() >= libc::IFNAMSIZ || dev.contains('\0') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad interface name"));
+    }
+    // SAFETY: valid fd; the name pointer/length describe a live byte slice.
+    let rc = unsafe {
+        libc::setsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            dev.as_ptr().cast(),
+            dev.len() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Login name for a uid, or "uid<N>".
 pub fn username(uid: u32) -> String {
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };

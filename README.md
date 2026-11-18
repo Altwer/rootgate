@@ -49,7 +49,7 @@ sudo install -d -o root -g root -m 0755 /etc/rootgate
 sudo install -o root -g root -m 0600 config.example.json /etc/rootgate/config.json
 sudoedit /etc/rootgate/config.json          # paste the phone's public key
 sudo install -o root -g root -m 0644 rootgated.service /etc/systemd/system/
-sudo ufw allow in on tailscale0 from <phone-tailscale-ip> to any port 7878 proto tcp comment rootgate
+sudo ufw allow in on tailscale0 from <phone-tailscale-ip> to any port 7878 proto tcp comment rootgate   # second layer next to bind_device
 sudo systemctl daemon-reload && sudo systemctl enable --now rootgated
 journalctl -u rootgated -f
 ```
@@ -104,6 +104,24 @@ why `check firewall` gives 148 bytes with SHA-256
 Enrolment: generate an EC P-256 key in the Android Keystore with
 `setUserAuthenticationRequired(true)` and paste `Base64(publicKey.getEncoded())`
 into `approver_pubkeys`.
+
+## Network hardening (tested in `tests/net_attack.rs` and live)
+
+- `bind_device: "tailscale0"` pins the listener to the Tailscale interface in the kernel.
+  Needed when another network (e.g. some Wi-Fi) hands out 100.64.0.0/10 addresses (same range as
+  Tailscale), or when Tailscale's own filtering is off (`--netfilter-mode=off`). Live check:
+  connections via Wi-Fi and localhost are refused; the listener shows as
+  `<computer-tailscale-ip>%tailscale0:7878`.
+- Unknown source IPs get closed immediately with zero bytes sent and no thread spawned
+  (300-connection flood test).
+- Max 4 phone connections; a phone that stops answering pings is dropped after 95 s;
+  a phone that stops reading is dropped instead of stalling the daemon.
+- Lines over 64 KiB, garbage, random bytes, 50 000-deep JSON nesting: connection closed,
+  daemon keeps working (verified after every attack).
+- A local process spoofing the phone's source IP (IP_FREEBIND) cannot connect, and even if
+  it could, it could only deny or see requests, never approve without the phone key.
+
+Run: `cargo test --release --test net_attack` (~50 s, tests run one at a time).
 
 ## Known limits
 
