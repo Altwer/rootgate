@@ -29,7 +29,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // No screenshots/recents thumbnails of commands; no overlays drawn on top of us.
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (!dev.altfurr.rootgate.BuildConfig.DEBUG) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dev.altfurr.rootgate.History.load(this)
         if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
 
         if (Build.VERSION.SDK_INT >= 33 &&
