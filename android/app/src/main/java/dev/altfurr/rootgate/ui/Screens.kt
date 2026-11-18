@@ -52,6 +52,10 @@ import dev.altfurr.rootgate.ApproverService
 import dev.altfurr.rootgate.Checks
 import dev.altfurr.rootgate.Hub
 import dev.altfurr.rootgate.Keys
+import dev.altfurr.rootgate.Power
+import androidx.compose.material3.Switch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.altfurr.rootgate.Settings
 import kotlinx.coroutines.delay
 
@@ -104,6 +108,7 @@ private fun Home(act: MainActivity, onOpen: (String) -> Unit) {
             notes.forEach { Text("• $it", fontSize = 13.sp, color = Warn) }
         }
         Spacer(Modifier.height(8.dp))
+        Background(act)
         Setup(act)
     }
 }
@@ -269,5 +274,36 @@ private fun Detail(act: MainActivity, p: Hub.Pending, onClose: () -> Unit) {
             ) { Text("Approve", fontSize = 18.sp) }
         }
         result?.let { Text(it, color = if (it.startsWith("Approved") || it == "Denied") Ok else Danger) }
+    }
+}
+
+@Composable
+private fun Background(act: MainActivity) {
+    var free by remember { mutableStateOf(Power.isUnrestricted(act)) }
+    var boot by remember { mutableStateOf(Power.startAtBoot(act)) }
+    // Re-check when coming back from the system dialog / settings.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { free = Power.isUnrestricted(act) }
+
+    Text("Background", fontWeight = FontWeight.SemiBold)
+    if (free) {
+        Text("Battery optimization: off. RootGate can stay connected.", fontSize = 13.sp, color = Ok)
+    } else {
+        Text(
+            "Battery optimization is ON: Samsung may cut the connection and requests will not arrive.",
+            fontSize = 13.sp,
+            color = Danger,
+        )
+        Button(onClick = { Power.requestUnrestricted(act) }) { Text("Allow running in background") }
+    }
+    Text(
+        "Samsung also has its own list: App info > Battery > Unrestricted, and RootGate must not be in Settings > Battery > Background usage limits > Sleeping apps.",
+        fontSize = 12.sp,
+        color = Color.Gray,
+    )
+    TextButton(onClick = { Power.openAppSettings(act) }) { Text("Open App info") }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Switch(checked = boot, onCheckedChange = { boot = it; Power.setStartAtBoot(act, it) })
+        Spacer(Modifier.width(8.dp))
+        Text("Start after reboot", fontSize = 14.sp)
     }
 }
