@@ -72,9 +72,16 @@ target/release/rootgate-dev-approver keygen /tmp/dev.key     # terminal stand-in
 
 Newline-delimited JSON over TCP to `<computer-tailscale-ip>:789`. Lines are at most 64 KiB.
 
+The phone speaks first, every connection:
+- `{"type":"hello","challenge":"<32 random bytes, base64>"}`
+
 Daemon -> phone:
-- `{"type":"hello","host":"...","proto":1}` on connect, then every pending request
-- `{"type":"request","request":{id,nonce,created,expires,uid,user,host,argv,why},"code":"7RL78B"}`
+- `{"type":"hello","host":"...","proto":2,"daemon_key":"<SPKI b64>","sig":"<b64 DER>"}`:
+  `sig` is the daemon identity key over `"ROOTGATE-HELLO-V2\n" || str challenge || str host || str daemon_key`.
+  The app pins `daemon_key` on first contact (after you compare fingerprints) and refuses a different one.
+- every pending request:
+  `{"type":"request","request":{id,nonce,created,expires,uid,user,host,argv,why},"code":"7RL78B","warnings":[...],"dsig":"..."}`;
+  `dsig` = daemon key over `"ROOTGATE-DREQ-V2\n" || u32 len || canonical bytes || u32 count || str warning...`
 - `{"type":"cancel","id":"...","reason":"approved|denied|expired|requester disconnected"}`
 - `{"type":"error","id":"..."|null,"message":"..."}`
 - `{"type":"ping"}` every 30 s. Answer `{"type":"pong"}` or you are dropped after 95 s of silence.
@@ -123,7 +130,40 @@ into `approver_pubkeys`.
 
 Run: `cargo test --release --test net_attack` (~50 s, tests run one at a time).
 
+## Daemon identity (protocol v2)
+
+`rootgated` creates `/etc/rootgate/daemon.key` (root, 0600) on first start and logs its
+fingerprint: `journalctl -u rootgated | grep fingerprint`. The app shows the fingerprint on
+first contact; tap Trust only if they match. Afterwards a different key (a copied daemon,
+anything else answering on that address) is shown as a possible impostor and the app stops
+connecting. The daemon listens on port 789: below 1024, so nothing running as a normal user
+can take over the port while the daemon is down.
+
+## Release build of the app (do not use the debug build for real approvals)
+
+A debug build lets any program on a USB-connected computer inject code into the app. The
+app refuses to approve while it is a debug build or while USB/wireless debugging is on.
+
+```
+cd android && ./gradlew assembleRelease            # unsigned, aligned APK
+keytool -genkeypair -keystore ~/rootgate-release.jks -alias rootgate \
+        -keyalg EC -groupname secp256r1 -validity 10000   # once; choose a password
+~/Android/Sdk/build-tools/35.0.0/apksigner sign --ks ~/rootgate-release.jks \
+        --out ~/rootgate-release.apk app/build/outputs/apk/release/app-release-unsigned.apk
+```
+
+Keep the keystore password in your head or password manager, never in a file: with the
+keystore and password, someone could build a malicious "update" that keeps the approval key.
+
 ## Known limits
+
+- **Agents and malware running as your own user.** You are in the `sudo` group, so anything
+  running as your user can wait for you to type your sudo password (e.g. a fake `sudo` in
+  fish config). rootgate cannot protect against that. Run AI agents and other untrusted
+  automation as a separate user without sudo and put only that uid in `allowed_uids`.
+- **Build artifacts live in your home folder.** Anything running as your user can modify
+  `install.sh` or `target/release/*` before you run them with sudo. Check `git status` /
+  `git diff` before installing.
 
 - Deny is not signed: anything at the phone's Tailscale IP can deny (harmless) but not approve.
 - Transport privacy relies on Tailscale (WireGuard). Approvals are authenticated by the

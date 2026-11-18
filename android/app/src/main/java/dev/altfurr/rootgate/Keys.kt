@@ -18,7 +18,8 @@ import java.util.Base64
  * the phone, and every single signature needs a fresh fingerprint or device PIN.
  */
 object Keys {
-    private const val ALIAS = "rootgate-approver-v1"
+    // v2: fingerprint only (a PIN someone has seen can no longer approve).
+    private const val ALIAS = "rootgate-approver-v2"
     private const val STORE = "AndroidKeyStore"
 
     private fun store() = KeyStore.getInstance(STORE).apply { load(null) }
@@ -30,11 +31,8 @@ object Keys {
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
             .setDigests(KeyProperties.DIGEST_SHA256)
             .setUserAuthenticationRequired(true)
-            // 0 = authenticate for every use; fingerprint or device PIN/pattern.
-            .setUserAuthenticationParameters(
-                0,
-                KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
-            )
+            // 0 = authenticate for every use; strong biometric only.
+            .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
             // A newly added fingerprint (e.g. by a thief who knows the PIN) kills the key.
             .setInvalidatedByBiometricEnrollment(true)
             .setUnlockedDeviceRequired(true)

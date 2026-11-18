@@ -9,7 +9,6 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
-import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import androidx.biometric.BiometricPrompt
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
@@ -17,6 +16,7 @@ import androidx.fragment.app.FragmentActivity
 import dev.altfurr.rootgate.ApproverService
 import dev.altfurr.rootgate.Canonical
 import dev.altfurr.rootgate.Checks
+import dev.altfurr.rootgate.DeviceSafety
 import dev.altfurr.rootgate.Hub
 import dev.altfurr.rootgate.Keys
 import dev.altfurr.rootgate.Protocol
@@ -54,13 +54,14 @@ class MainActivity : FragmentActivity() {
      * We sign the canonical bytes of the exact object shown on screen.
      */
     fun approve(p: Hub.Pending, onResult: (String?) -> Unit) {
-        val problems = Checks.problems(p.req, p.daemonCode, System.currentTimeMillis() / 1000)
+        val problems = Checks.problems(p.req, p.daemonCode, System.currentTimeMillis() / 1000) +
+            DeviceSafety.problems(this)
         if (problems.isNotEmpty()) return onResult(problems.first())
         if (!Keys.exists()) return onResult("No approval key yet. Create one in Setup.")
         val sig = try {
             Keys.signatureForAuth()
         } catch (e: KeyPermanentlyInvalidatedException) {
-            return onResult("Key was invalidated (fingerprints changed). Delete it and enrol a new one.")
+            return onResult("Key was invalidated (fingerprints changed). Delete it, create a new one and update the computer's config.")
         } catch (e: Exception) {
             return onResult("Keystore error: ${e.message}")
         }
@@ -91,7 +92,8 @@ class MainActivity : FragmentActivity() {
             .setTitle("Run as root: ${p.daemonCode}")
             .setSubtitle("${p.req.user}@${p.req.host}")
             .setDescription(p.req.argv.joinToString(" ").take(300))
-            .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
+            .setAllowedAuthenticators(BIOMETRIC_STRONG)
+            .setNegativeButtonText("Cancel")
             .setConfirmationRequired(true)
             .build()
         prompt.authenticate(info, BiometricPrompt.CryptoObject(sig))
