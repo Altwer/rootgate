@@ -49,7 +49,7 @@ sudo install -d -o root -g root -m 0755 /etc/rootgate
 sudo install -o root -g root -m 0600 config.example.json /etc/rootgate/config.json
 sudoedit /etc/rootgate/config.json          # paste the phone's public key
 sudo install -o root -g root -m 0644 rootgated.service /etc/systemd/system/
-sudo ufw allow in on tailscale0 from <phone-tailscale-ip> to any port 7878 proto tcp comment rootgate   # second layer next to bind_device
+sudo ufw allow in on tailscale0 from <phone-tailscale-ip> to any port 789 proto tcp comment rootgate   # second layer next to bind_device
 sudo systemctl daemon-reload && sudo systemctl enable --now rootgated
 journalctl -u rootgated -f
 ```
@@ -70,7 +70,7 @@ target/release/rootgate-dev-approver keygen /tmp/dev.key     # terminal stand-in
 
 ## Protocol (for the Android app)
 
-Newline-delimited JSON over TCP to `<computer-tailscale-ip>:7878`. Lines are at most 64 KiB.
+Newline-delimited JSON over TCP to `<computer-tailscale-ip>:789`. Lines are at most 64 KiB.
 
 Daemon -> phone:
 - `{"type":"hello","host":"...","proto":1}` on connect, then every pending request
@@ -111,7 +111,7 @@ into `approver_pubkeys`.
   Needed when another network (e.g. some Wi-Fi) hands out 100.64.0.0/10 addresses (same range as
   Tailscale), or when Tailscale's own filtering is off (`--netfilter-mode=off`). Live check:
   connections via Wi-Fi and localhost are refused; the listener shows as
-  `<computer-tailscale-ip>%tailscale0:7878`.
+  `<computer-tailscale-ip>%tailscale0:789`.
 - Unknown source IPs get closed immediately with zero bytes sent and no thread spawned
   (300-connection flood test).
 - Max 4 phone connections; a phone that stops answering pings is dropped after 95 s;

@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 
 /// Domain separation prefix; bump the version if the encoding ever changes.
 pub const MAGIC: &[u8] = b"ROOTGATE-V1\n";
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
+/// Domain separation for the daemon's own signatures (never valid as approvals).
+pub const HELLO_MAGIC: &[u8] = b"ROOTGATE-HELLO-V2\n";
+pub const DREQ_MAGIC: &[u8] = b"ROOTGATE-DREQ-V2\n";
 
 pub const MAX_ARGS: usize = 64;
 pub const MAX_ARG_BYTES: usize = 4096;
@@ -123,8 +126,12 @@ pub enum ToClient {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToApprover {
-    Hello { host: String, proto: u32 },
-    Request { request: Request, code: String },
+    /// Answer to the phone's challenge. `sig` proves the daemon holds the private
+    /// half of `daemon_key` (base64 SPKI), which the phone pins.
+    Hello { host: String, proto: u32, daemon_key: String, sig: String },
+    /// `warnings` are the daemon's findings about the command (e.g. a script your
+    /// user can edit). `dsig` = daemon signature over `daemon_request_bytes`.
+    Request { request: Request, code: String, warnings: Vec<String>, dsig: String },
     /// The request is gone (approved, denied, expired or the requester left).
     Cancel { id: String, reason: String },
     Error { id: Option<String>, message: String },
@@ -135,6 +142,8 @@ pub enum ToApprover {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromApprover {
+    /// First message on every connection: 32 random bytes, base64.
+    Hello { challenge: String },
     /// `sig` is required for approve: base64 DER ECDSA-P256-SHA256 over
     /// `Request::canonical_bytes()`.
     Decision {
@@ -163,6 +172,16 @@ pub fn is_suspicious_char(c: char, allow_newline: bool) -> bool {
             | '\u{2066}'..='\u{2069}' // bidi isolates
             | '\u{FEFF}'              // BOM / zero-width no-break space
             | '\u{FFF9}'..='\u{FFFB}' // interlinear annotations
+            // Blank-looking letters and odd spaces (pentest finding)
+            | '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' | '\u{3164}' | '\u{FFA0}' | '\u{2800}' | '\u{115F}' | '\u{1160}'
+            | '\u{034F}' | '\u{17B4}' | '\u{17B5}'
+            // Combining marks can overlay/strike characters
+            | '\u{0300}'..='\u{036F}' | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}' | '\u{FE20}'..='\u{FE2F}'
+            // Variation selectors, tags, private use
+            | '\u{FE00}'..='\u{FE0F}' | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}'
+            | '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{10FFFF}'
         )
 }
 
@@ -195,6 +214,20 @@ pub fn validate_argv(argv: &[String]) -> Result<(), String> {
     }
     if exe.split('/').any(|c| c == "." || c == "..") || exe.contains("//") || exe.ends_with('/') {
         return Err("argv[0] must be a plain absolute path (no '.', '..', '//')".into());
+    }
+    Ok(())
+}
+
+/// Default policy: arguments are printable ASCII only, so nothing can look like
+/// something else (homoglyphs, blank letters). Can be relaxed in the config.
+pub fn check_ascii_args(argv: &[String]) -> Result<(), String> {
+    for (i, a) in argv.iter().enumerate() {
+        if let Some(c) = a.chars().find(|c| !(' '..='~').contains(c)) {
+            return Err(format!(
+                "argument {i} contains non-ASCII character U+{:04X} (set allow_non_ascii_args to permit)",
+                c as u32
+            ));
+        }
     }
     Ok(())
 }
@@ -245,6 +278,49 @@ pub fn verify_approval(keys: &[VerifyingKey], canonical: &[u8], sig_b64: &str) -
     // Android may produce high-S signatures; accept both forms.
     let sig = sig.normalize_s();
     keys.iter().any(|k| k.verify(canonical, &sig).is_ok())
+}
+
+fn put_str2(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// What the daemon signs to answer the phone's challenge.
+pub fn hello_bytes(challenge: &str, host: &str, daemon_key: &str) -> Vec<u8> {
+    let mut out = HELLO_MAGIC.to_vec();
+    put_str2(&mut out, challenge);
+    put_str2(&mut out, host);
+    put_str2(&mut out, daemon_key);
+    out
+}
+
+/// What the daemon signs for every request it shows on the phone.
+pub fn daemon_request_bytes(req: &Request, warnings: &[String]) -> Vec<u8> {
+    let mut out = DREQ_MAGIC.to_vec();
+    let c = req.canonical_bytes();
+    out.extend_from_slice(&(c.len() as u32).to_be_bytes());
+    out.extend_from_slice(&c);
+    out.extend_from_slice(&(warnings.len() as u32).to_be_bytes());
+    for w in warnings {
+        put_str2(&mut out, w);
+    }
+    out
+}
+
+/// Base64 DER ECDSA-P256-SHA256 signature over `msg`.
+pub fn sign_bytes(sk: &SigningKey, msg: &[u8]) -> String {
+    let sig: Signature = sk.sign(msg);
+    B64.encode(sig.to_der().as_bytes())
+}
+
+/// SHA-256 of the SPKI, first 8 bytes, "AB:CD:..." (same as the app shows).
+pub fn fingerprint(vk: &VerifyingKey) -> String {
+    let doc = vk.to_public_key_der().expect("valid key");
+    Sha256::digest(doc.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Sign a request (used by the dev approver and the tests; the phone does the

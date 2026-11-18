@@ -25,6 +25,14 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if unsafe { libc::geteuid() } == 0 {
+        // Below 1024 only root can listen, so nothing running as a normal user can
+        // pretend to be this daemon while it is down.
+        let port = cfg.listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+        if port >= 1024 {
+            eprintln!("rootgated: WARNING listen port {port} is unprivileged; use a port below 1024 (e.g. 789)");
+        }
+    }
     if !cfg.require_trusted_exe {
         eprintln!("rootgated: WARNING require_trusted_exe is off; approved binaries could be swapped");
     }

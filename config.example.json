@@ -1,6 +1,6 @@
 {
   "socket_path": "/run/rootgate/rootgate.sock",
-  "listen": "100.x.y.z:789",
+  "listen": "YOUR_COMPUTER_TAILSCALE_IP:789",
   "bind_device": "tailscale0",
   "approver_ips": ["YOUR_PHONE_TAILSCALE_IP"],
   "approver_pubkeys": ["PASTE_THE_PHONE_PUBLIC_KEY_HERE"],

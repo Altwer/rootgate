@@ -8,7 +8,7 @@ use crate::proto::{
 };
 use crate::trust;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use p256::ecdsa::VerifyingKey;
+use p256::ecdsa::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
@@ -23,6 +23,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_CONFIG: &str = "/etc/rootgate/config.json";
+pub const DEFAULT_DAEMON_KEY: &str = "/etc/rootgate/daemon.key";
+fn d_daemon_key() -> PathBuf { PathBuf::from(DEFAULT_DAEMON_KEY) }
 
 fn d_ttl() -> u64 { 120 }
 fn d_exec_timeout() -> u64 { 600 }
@@ -67,6 +69,44 @@ pub struct Config {
     /// Require argv[0] and the path to it to be root-controlled. Only turn off in tests.
     #[serde(default = "d_true")]
     pub require_trusted_exe: bool,
+    /// The daemon's own identity key (created on first start, root-only).
+    #[serde(default = "d_daemon_key")]
+    pub daemon_key_path: PathBuf,
+    /// Arguments are printable ASCII only unless this is set.
+    #[serde(default)]
+    pub allow_non_ascii_args: bool,
+}
+
+/// Load the daemon's identity key, creating it (mode 0600) on first start.
+pub fn load_or_create_daemon_key(path: &Path) -> Result<SigningKey, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    if path.exists() {
+        if unsafe { libc::geteuid() } == 0 {
+            trust::check_root_owned_file(path)?;
+            let mode = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(format!("{} must be mode 0600", path.display()));
+            }
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = crate::unhex(&text).ok_or_else(|| format!("{}: not hex", path.display()))?;
+        return SigningKey::from_slice(&bytes).map_err(|_| format!("{}: invalid key", path.display()));
+    }
+    let sk = loop {
+        if let Ok(k) = SigningKey::from_slice(&crate::random_bytes::<32>()) {
+            break k;
+        }
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(crate::hex(&sk.to_bytes()).as_bytes()).map_err(|e| e.to_string())?;
+    log(format!("created daemon identity key {}", path.display()));
+    Ok(sk)
 }
 
 impl Config {
@@ -91,7 +131,20 @@ struct Pending {
     req: Request,
     canonical: Vec<u8>,
     code: String,
+    warnings: Vec<String>,
+    dsig: String,
     reply: mpsc::Sender<Outcome>,
+}
+
+impl Pending {
+    fn to_msg(&self) -> ToApprover {
+        ToApprover::Request {
+            request: self.req.clone(),
+            code: self.code.clone(),
+            warnings: self.warnings.clone(),
+            dsig: self.dsig.clone(),
+        }
+    }
 }
 
 struct Approver {
@@ -109,6 +162,8 @@ struct State {
 struct Daemon {
     cfg: Config,
     keys: Vec<VerifyingKey>,
+    identity: SigningKey,
+    identity_pub: String,
     host: String,
     state: Mutex<State>,
     shutdown: AtomicBool,
@@ -118,6 +173,8 @@ struct Daemon {
 pub struct Handle {
     pub tcp_addr: SocketAddr,
     pub socket_path: PathBuf,
+    /// base64 SPKI of the daemon identity key (what the phone pins).
+    pub daemon_key: String,
     daemon: Arc<Daemon>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -202,6 +259,9 @@ pub fn start(cfg: Config) -> Result<Handle, String> {
     if cfg.allowed_uids.is_empty() {
         return Err("no allowed_uids configured".into());
     }
+    let identity = load_or_create_daemon_key(&cfg.daemon_key_path)?;
+    let identity_pub = proto::encode_public_key(identity.verifying_key());
+    log(format!("daemon identity fingerprint {}", proto::fingerprint(identity.verifying_key())));
 
     // Replace a stale socket, but never delete something that is not a socket.
     if let Ok(m) = std::fs::symlink_metadata(&cfg.socket_path) {
@@ -228,6 +288,8 @@ pub fn start(cfg: Config) -> Result<Handle, String> {
     let d = Arc::new(Daemon {
         cfg,
         keys,
+        identity,
+        identity_pub: identity_pub.clone(),
         host: hostname(),
         state: Mutex::new(State::default()),
         shutdown: AtomicBool::new(false),
@@ -248,7 +310,7 @@ pub fn start(cfg: Config) -> Result<Handle, String> {
         threads.push(thread::spawn(move || sweeper(d)));
     }
     log(format!("listening on {} and {tcp_addr}", socket_path.display()));
-    Ok(Handle { tcp_addr, socket_path, daemon: d, threads })
+    Ok(Handle { tcp_addr, socket_path, daemon_key: identity_pub, daemon: d, threads })
 }
 
 // ------------------------------------------------------------------ clients
@@ -313,6 +375,10 @@ fn handle_client(d: &Arc<Daemon>, s: UnixStream) -> io::Result<()> {
     if let Err(e) = proto::validate_argv(&argv).and_then(|_| proto::validate_why(&why)) {
         return reply_err(&mut w, e);
     }
+    if !d.cfg.allow_non_ascii_args
+        && let Err(e) = proto::check_ascii_args(&argv) {
+            return reply_err(&mut w, e);
+        }
     if d.cfg.require_trusted_exe
         && let Err(e) = trust::resolve_trusted_exe(&argv[0]) {
             return reply_err(&mut w, format!("refusing untrusted executable: {e}"));
@@ -332,6 +398,8 @@ fn handle_client(d: &Arc<Daemon>, s: UnixStream) -> io::Result<()> {
     };
     let canonical = req.canonical_bytes();
     let code = req.code();
+    let warnings = trust::warnings(&req.argv);
+    let dsig = proto::sign_bytes(&d.identity, &proto::daemon_request_bytes(&req, &warnings));
     let (tx, rx) = mpsc::channel();
     {
         let mut st = d.lock();
@@ -339,18 +407,17 @@ fn handle_client(d: &Arc<Daemon>, s: UnixStream) -> io::Result<()> {
             drop(st);
             return reply_err(&mut w, "too many pending requests");
         }
-        Daemon::broadcast(&mut st, &ToApprover::Request { request: req.clone(), code: code.clone() });
-        st.pending.insert(
-            req.id.clone(),
-            Pending { req: req.clone(), canonical, code: code.clone(), reply: tx },
-        );
+        let p = Pending { req: req.clone(), canonical, code: code.clone(), warnings: warnings.clone(), dsig, reply: tx };
+        Daemon::broadcast(&mut st, &p.to_msg());
+        st.pending.insert(req.id.clone(), p);
     }
     log(format!(
-        "request {} code {code} from {} (pid {pid}): {} -- why: {}",
+        "request {} code {code} from {} (pid {pid}): {} -- why: {}{}",
         req.id,
         req.user,
         serde_json::to_string(&req.argv).unwrap_or_default(),
-        serde_json::to_string(&req.why).unwrap_or_default()
+        serde_json::to_string(&req.why).unwrap_or_default(),
+        if warnings.is_empty() { String::new() } else { format!(" -- warnings: {}", warnings.len()) }
     ));
     send_json(&mut w, &ToClient::Pending { id: req.id.clone(), code, expires: req.expires })?;
 
@@ -478,6 +545,23 @@ fn handle_approver(d: &Arc<Daemon>, s: TcpStream, ip: IpAddr) -> io::Result<()> 
     s.set_read_timeout(Some(Duration::from_secs(d.cfg.ping_secs * 3 + 5)))?;
     s.set_write_timeout(Some(Duration::from_secs(10)))?;
 
+    // The phone speaks first: a random challenge the daemon must sign, so the
+    // phone knows it talks to the real daemon (pinned key), not an impostor.
+    let mut reader = BufReader::new(s.try_clone()?);
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10)))?;
+    let challenge = match read_line_bounded(&mut reader, 1024)? {
+        Some(l) => match serde_json::from_str::<FromApprover>(&l) {
+            Ok(FromApprover::Hello { challenge }) => challenge,
+            _ => return Err(io::Error::other("expected hello with challenge")),
+        },
+        None => return Ok(()),
+    };
+    if B64.decode(&challenge).map(|c| c.len()).unwrap_or(0) != 32 {
+        return Err(io::Error::other("challenge must be 32 random bytes"));
+    }
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(d.cfg.ping_secs * 3 + 5)))?;
+    let hello_sig = proto::sign_bytes(&d.identity, &proto::hello_bytes(&challenge, &d.host, &d.identity_pub));
+
     let (tx, rx) = mpsc::sync_channel::<String>(64);
     let conn_id;
     {
@@ -488,11 +572,16 @@ fn handle_approver(d: &Arc<Daemon>, s: TcpStream, ip: IpAddr) -> io::Result<()> 
         conn_id = st.next_conn;
         st.next_conn += 1;
         // Greeting and everything currently pending, in creation order.
-        let _ = tx.try_send(Daemon::line(&ToApprover::Hello { host: d.host.clone(), proto: PROTO_VERSION }));
+        let _ = tx.try_send(Daemon::line(&ToApprover::Hello {
+            host: d.host.clone(),
+            proto: PROTO_VERSION,
+            daemon_key: d.identity_pub.clone(),
+            sig: hello_sig,
+        }));
         let mut pending: Vec<&Pending> = st.pending.values().collect();
         pending.sort_by_key(|p| p.req.created);
         for p in pending {
-            let _ = tx.try_send(Daemon::line(&ToApprover::Request { request: p.req.clone(), code: p.code.clone() }));
+            let _ = tx.try_send(Daemon::line(&p.to_msg()));
         }
         st.approvers.insert(conn_id, Approver { tx: tx.clone(), sock: s.try_clone()? });
     }
@@ -509,11 +598,11 @@ fn handle_approver(d: &Arc<Daemon>, s: TcpStream, ip: IpAddr) -> io::Result<()> 
         let _ = wsock.shutdown(Shutdown::Both);
     });
 
-    let mut reader = BufReader::new(s);
+    drop(s);
     let result = (|| -> io::Result<()> {
         while let Some(line) = read_line_bounded(&mut reader, MAX_LINE)? {
             match serde_json::from_str::<FromApprover>(&line) {
-                Ok(FromApprover::Pong) => {}
+                Ok(FromApprover::Pong) | Ok(FromApprover::Hello { .. }) => {}
                 Ok(FromApprover::Decision { id, approve, sig }) => {
                     decide(d, &tx, conn_id, &id, approve, sig.as_deref());
                 }

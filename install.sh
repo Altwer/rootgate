@@ -31,7 +31,7 @@ if [[ ! -e /etc/rootgate/config.json || $NEW_CONFIG -eq 1 ]]; then
   cat > /etc/rootgate/config.json <<EOF
 {
   "socket_path": "/run/rootgate/rootgate.sock",
-  "listen": "$LISTEN_IP:7878",
+  "listen": "$LISTEN_IP:789",
   "bind_device": "tailscale0",
   "approver_ips": ["$PHONE_IP"],
   "approver_pubkeys": ["$PUBKEY"],
@@ -42,7 +42,7 @@ if [[ ! -e /etc/rootgate/config.json || $NEW_CONFIG -eq 1 ]]; then
 EOF
   chown root:root /etc/rootgate/config.json
   chmod 0600 /etc/rootgate/config.json
-  echo "wrote /etc/rootgate/config.json (listen $LISTEN_IP:7878, phone $PHONE_IP, uid $ALLOW_UID)"
+  echo "wrote /etc/rootgate/config.json (listen $LISTEN_IP:789, phone $PHONE_IP, uid $ALLOW_UID)"
 else
   echo "kept existing /etc/rootgate/config.json (use --new-config to replace)"
 fi
@@ -55,13 +55,18 @@ systemctl restart rootgated
 
 echo "== firewall"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  ufw allow in on tailscale0 from "$PHONE_IP" to any port 7878 proto tcp comment rootgate >/dev/null
-  echo "ufw: allowed 7878/tcp from $PHONE_IP on tailscale0 only"
+  # Old unprivileged port from v1, if present.
+  ufw delete allow in on tailscale0 from "$PHONE_IP" to any port 7878 proto tcp >/dev/null 2>&1 || true
+  ufw allow in on tailscale0 from "$PHONE_IP" to any port 789 proto tcp comment rootgate >/dev/null
+  echo "ufw: allowed 789/tcp from $PHONE_IP on tailscale0 only"
 else
   echo "ufw not active; relying on bind_device + IP allowlist + signatures"
 fi
 
 sleep 1
 systemctl --no-pager --lines=5 status rootgated || true
+echo
+echo "Daemon identity (compare with the fingerprint the phone shows before tapping Trust):"
+journalctl -u rootgated -n 50 --no-pager -o cat | grep "identity fingerprint" | tail -1
 echo
 echo "Done. Try:  ask-root --why \"test\" -- id -u"

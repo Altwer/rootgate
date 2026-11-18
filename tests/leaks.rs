@@ -45,6 +45,15 @@ fn next_request(r: &mut BufReader<TcpStream>, w: &mut TcpStream, tag: &str) -> p
     }
 }
 
+
+/// Phone side of the v2 handshake: send a challenge, check the daemon's answer.
+fn phone_hello(w: &mut TcpStream) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    let challenge = B64.encode(rootgate::random_bytes::<32>());
+    send_json(w, &FromApprover::Hello { challenge: challenge.clone() }).unwrap();
+    challenge
+}
+
 #[test]
 #[ignore]
 fn no_growth_over_many_cycles() {
@@ -65,6 +74,8 @@ fn no_growth_over_many_cycles() {
         max_clients: 16,
         ping_secs: 1,
         require_trusted_exe: true,
+        daemon_key_path: dir.join("daemon.key"),
+        allow_non_ascii_args: false,
     };
     let h = daemon::start(cfg).unwrap();
 
@@ -74,6 +85,7 @@ fn no_growth_over_many_cycles() {
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut pw = s.try_clone().unwrap();
         let mut pr = BufReader::new(s);
+        phone_hello(&mut pw);
         for j in 0..10 {
             let c = UnixStream::connect(&h.socket_path).unwrap();
             c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
