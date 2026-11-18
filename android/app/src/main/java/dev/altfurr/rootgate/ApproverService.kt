@@ -72,6 +72,15 @@ class ApproverService : Service() {
             val port = Settings.port(this)
             Hub.setStatus(Hub.Status.Connecting("$host:$port"))
             var mine: java.io.OutputStream? = null
+            if (!DeviceSafety.vpnUp(this)) {
+                // Without Tailscale, 100.x may route to someone else's network.
+                Hub.setStatus(Hub.Status.Down("Tailscale (VPN) is off", backoff / 1000))
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000L)
+                continue
+            }
+            var trusted = false
+            var stop = false
             try {
                 Socket().use { s ->
                     socket = s
@@ -84,6 +93,11 @@ class ApproverService : Service() {
                     Hub.attach(mine!!)
                     val input = BufferedInputStream(s.getInputStream())
                     var greeted = false
+                    // We speak first: a fresh challenge only the real daemon can sign.
+                    val challenge = java.util.Base64.getEncoder().encodeToString(
+                        ByteArray(32).also { java.security.SecureRandom().nextBytes(it) },
+                    )
+                    if (!Hub.send(Protocol.hello(challenge))) throw IOException("could not send hello")
                     while (true) {
                         val line = Protocol.readLine(input) ?: break
                         val msg = try {
@@ -96,11 +110,39 @@ class ApproverService : Service() {
                         when (msg) {
                             is FromDaemon.Hello -> {
                                 if (msg.proto != PROTO_VERSION) throw IOException("daemon speaks protocol ${msg.proto}, app speaks $PROTO_VERSION")
+                                if (!DaemonAuth.verify(msg.daemonKey, Canonical.helloBytes(challenge, msg.host, msg.daemonKey), msg.sig)) {
+                                    throw IOException("daemon failed the challenge")
+                                }
                                 greeted = true
-                                backoff = 2_000L
-                                Hub.setStatus(Hub.Status.Connected(msg.host))
+                                val fp = Canonical.fingerprint(msg.daemonKey)
+                                val pinned = Settings.pinnedKey(this)
+                                when {
+                                    pinned == null -> {
+                                        // Ask the user to compare fingerprints; ignore requests until then.
+                                        Hub.setStatus(Hub.Status.Untrusted(msg.host, msg.daemonKey, fp))
+                                    }
+                                    pinned != msg.daemonKey -> {
+                                        Hub.setStatus(Hub.Status.KeyMismatch(msg.host, fp))
+                                        stop = true
+                                        break
+                                    }
+                                    else -> {
+                                        trusted = true
+                                        backoff = 2_000L
+                                        Hub.setStatus(Hub.Status.Connected(msg.host, fp))
+                                    }
+                                }
                             }
-                            is FromDaemon.Req -> onRequest(msg)
+                            is FromDaemon.Req -> {
+                                val key = Settings.pinnedKey(this)
+                                if (trusted && key != null &&
+                                    DaemonAuth.verify(key, Canonical.daemonRequestBytes(msg.request, msg.warnings), msg.dsig)
+                                ) {
+                                    onRequest(msg)
+                                } else if (trusted) {
+                                    Hub.note("Dropped a request that was not signed by your computer")
+                                }
+                            }
                             is FromDaemon.Cancel -> {
                                 Hub.remove(msg.id)
                                 nm(this).cancel(notifId(msg.id))
@@ -111,6 +153,15 @@ class ApproverService : Service() {
                     }
                 }
                 Hub.detach(mine)
+                if (stop) {
+                    // Key mismatch: do not keep reconnecting to a possible impostor.
+                    job = null
+                    return
+                }
+                if (Hub.status.value is Hub.Status.Untrusted) {
+                    delay(backoff)
+                    continue
+                }
                 Hub.setStatus(Hub.Status.Down("daemon closed the connection", backoff / 1000))
             } catch (e: Exception) {
                 Hub.detach(mine)
@@ -141,7 +192,7 @@ class ApproverService : Service() {
     private fun onRequest(msg: FromDaemon.Req) {
         val r = msg.request
         val local = try { Canonical.code(r) } catch (e: Exception) { "??????" }
-        Hub.upsert(Hub.Pending(r, msg.code, local))
+        Hub.upsert(Hub.Pending(r, msg.code, local, msg.warnings))
         // Lock screen shows only that something is pending, never the command.
         val public = Notification.Builder(this, CH_REQUESTS)
             .setSmallIcon(R.drawable.ic_notify)
@@ -150,7 +201,7 @@ class ApproverService : Service() {
         val n = Notification.Builder(this, CH_REQUESTS)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle("Root request ${msg.code} from ${r.user}@${r.host}")
-            .setContentText(r.argv.joinToString(" ").take(200))
+            .setContentText((if (msg.warnings.isNotEmpty()) "⚠ " else "") + r.argv.joinToString(" ").take(200))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(public)
@@ -180,7 +231,10 @@ class ApproverService : Service() {
 
         private fun nm(c: Context) = c.getSystemService(NotificationManager::class.java)
 
-        private fun notifId(id: String) = 1000 + (id.hashCode() and 0x7fff)
+        // A real counter per request id: no hash collisions between requests.
+        private val ids = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        private val nextId = java.util.concurrent.atomic.AtomicInteger(1000)
+        private fun notifId(id: String): Int = ids.getOrPut(id) { nextId.getAndIncrement() }
 
         fun channels(c: Context) {
             nm(c).createNotificationChannel(

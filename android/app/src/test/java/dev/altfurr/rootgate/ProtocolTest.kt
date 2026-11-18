@@ -63,14 +63,52 @@ class ProtocolTest {
     @Test
     fun parsesExactlyWhatRustSends() {
         // Lines as serialized by serde in rootgate's proto.rs.
-        assertEquals(FromDaemon.Hello("laptop", 1), Protocol.parse("""{"type":"hello","host":"laptop","proto":1}"""))
+        assertEquals(
+            FromDaemon.Hello("laptop", 2, "KEY", "SIG"),
+            Protocol.parse("""{"type":"hello","host":"laptop","proto":2,"daemon_key":"KEY","sig":"SIG"}"""),
+        )
         assertEquals(FromDaemon.Ping, Protocol.parse("""{"type":"ping"}"""))
         assertEquals(FromDaemon.Cancel("x", "approved"), Protocol.parse("""{"type":"cancel","id":"x","reason":"approved"}"""))
         assertEquals(FromDaemon.Error(null, "bad"), Protocol.parse("""{"type":"error","id":null,"message":"bad"}"""))
-        val line = """{"type":"request","request":{"id":"00112233445566778899aabbccddeeff","nonce":"bm9uY2U=","created":1000,"expires":1120,"uid":1000,"user":"alice","host":"laptop","argv":["/usr/sbin/ufw","status"],"why":"check firewall"},"code":"AFCY8L"}"""
+        val line = """{"type":"request","request":{"id":"00112233445566778899aabbccddeeff","nonce":"bm9uY2U=","created":1000,"expires":1120,"uid":1000,"user":"alice","host":"laptop","argv":["/usr/sbin/ufw","status"],"why":"check firewall"},"code":"AFCY8L","warnings":["w1"],"dsig":"AA=="}"""
         val m = Protocol.parse(line) as FromDaemon.Req
         assertEquals(sample, m.request)
         assertEquals(Canonical.code(m.request), m.code)
+        assertEquals(listOf("w1"), m.warnings)
+    }
+
+    @Test
+    fun daemonSignedBytesMatchRust() {
+        // Same values pinned in rootgate/src/proto.rs (and checked with Python).
+        assertEquals(
+            "780d5476ab4b9579b879d9048ef8191fcb090a556d2813560a307373c7314853",
+            hex(Canonical.sha256(Canonical.helloBytes("Y2hhbGxlbmdl", "laptop", "KEY"))),
+        )
+        assertEquals(
+            "e8688730e463708ba60248558ebfe99c86a2fa6b7450fa0820c10bd01baeb7b4",
+            hex(Canonical.sha256(Canonical.daemonRequestBytes(sample, listOf("w1")))),
+        )
+        assertEquals("""{"type":"hello","challenge":"Y2g="}""", Protocol.hello("Y2g="))
+    }
+
+    @Test
+    fun daemonAuthAcceptsOnlyTheRealKey() {
+        val gen = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }
+        val real = gen.generateKeyPair()
+        val impostor = gen.generateKeyPair()
+        val enc = Base64.getEncoder()
+        val realKey = enc.encodeToString(real.public.encoded)
+        fun sign(k: java.security.PrivateKey, m: ByteArray) =
+            enc.encodeToString(Signature.getInstance("SHA256withECDSA").run { initSign(k); update(m); sign() })
+        val msg = Canonical.helloBytes("Y2hhbGxlbmdl", "laptop", realKey)
+        assertTrue(DaemonAuth.verify(realKey, msg, sign(real.private, msg)))
+        // Impostor signing with its own key, claiming the real key: rejected.
+        assertFalse(DaemonAuth.verify(realKey, msg, sign(impostor.private, msg)))
+        // Replaying an answer to a different challenge: rejected.
+        val old = Canonical.helloBytes("b2xk", "laptop", realKey)
+        assertFalse(DaemonAuth.verify(realKey, msg, sign(real.private, old)))
+        assertFalse(DaemonAuth.verify(realKey, msg, "garbage"))
+        assertEquals(23, Canonical.fingerprint(realKey).length)
     }
 
     @Test
@@ -126,6 +164,20 @@ class ProtocolTest {
         assertTrue(Checks.problems(multiline, Canonical.code(multiline), now).isEmpty())
         assertTrue(Checks.hasNonAscii("1ОО.0.0.1")) // Cyrillic O
         assertFalse(Checks.hasNonAscii("100.0.0.1"))
+    }
+
+    @Test
+    fun blankLettersAndNonAsciiArgsBlocked() {
+        val now = 1050L
+        for (bad in listOf("a\u3164b", "a\uFFA0b", "a\u2800b", "a\u00A0b", "a\u0336b", "1\u041E\u041E.0.0.1")) {
+            val r = sample.copy(argv = listOf("/usr/bin/echo", bad))
+            assertTrue(bad, Checks.problems(r, Canonical.code(r), now).isNotEmpty())
+        }
+        // Czech is fine in the reason, blank letters are not.
+        val cz = sample.copy(why = "zkontrolovat firewall, prosím")
+        assertTrue(Checks.problems(cz, Canonical.code(cz), now).isEmpty())
+        val blank = sample.copy(why = "ok\u3164")
+        assertTrue(Checks.problems(blank, Canonical.code(blank), now).isNotEmpty())
     }
 
     /**

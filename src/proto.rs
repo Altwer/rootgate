@@ -381,6 +381,34 @@ mod tests {
     }
 
     #[test]
+    fn daemon_signed_bytes_known_answer() {
+        // Pinned with Python and in the Android tests.
+        assert_eq!(
+            crate::hex(&Sha256::digest(hello_bytes("Y2hhbGxlbmdl", "laptop", "KEY"))),
+            "780d5476ab4b9579b879d9048ef8191fcb090a556d2813560a307373c7314853"
+        );
+        assert_eq!(
+            crate::hex(&Sha256::digest(daemon_request_bytes(&sample(), &["w1".into()]))),
+            "e8688730e463708ba60248558ebfe99c86a2fa6b7450fa0820c10bd01baeb7b4"
+        );
+        assert_eq!(sample().code(), "AFCY8L");
+        // Daemon signatures can never double as approvals (different prefix).
+        let sk = key();
+        let d = sign_bytes(&sk, &daemon_request_bytes(&sample(), &[]));
+        assert!(!verify_approval(&[*sk.verifying_key()], &sample().canonical_bytes(), &d));
+    }
+
+    #[test]
+    fn stricter_invisible_chars() {
+        for c in ['\u{00A0}', '\u{3164}', '\u{FFA0}', '\u{2800}', '\u{0336}', '\u{FE0F}', '\u{E0041}', '\u{E000}'] {
+            assert!(is_suspicious_char(c, true), "U+{:04X}", c as u32);
+        }
+        assert!(!is_suspicious_char('č', true));
+        assert!(check_ascii_args(&["/usr/bin/echo".into(), "ok ~!".into()]).is_ok());
+        assert!(check_ascii_args(&["/usr/bin/echo".into(), "1ОО".into()]).is_err());
+    }
+
+    #[test]
     fn short_code_format() {
         let code = sample().code();
         assert_eq!(code.len(), 6);

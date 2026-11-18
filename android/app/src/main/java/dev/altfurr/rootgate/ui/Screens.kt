@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.altfurr.rootgate.ApproverService
 import dev.altfurr.rootgate.Checks
+import dev.altfurr.rootgate.DeviceSafety
 import dev.altfurr.rootgate.Hub
 import dev.altfurr.rootgate.Keys
 import dev.altfurr.rootgate.Power
@@ -93,6 +94,8 @@ private fun Home(act: MainActivity, onOpen: (String) -> Unit) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("RootGate", fontSize = 28.sp, fontWeight = FontWeight.Bold)
         StatusLine(status)
+        Trust(act, status)
+        SafetyBanner(act)
         Text("Pending requests", fontWeight = FontWeight.SemiBold)
         if (pending.isEmpty()) Text("Nothing waiting.", color = Color.Gray)
         pending.forEach { p ->
@@ -118,8 +121,10 @@ private fun StatusLine(s: Hub.Status) {
     val (txt, col) = when (s) {
         Hub.Status.Stopped -> "Stopped" to Color.Gray
         is Hub.Status.Connecting -> "Connecting to ${s.target}…" to Warn
-        is Hub.Status.Connected -> "Connected to ${s.host}" to Ok
+        is Hub.Status.Connected -> "Connected to ${s.host} (verified ${s.fingerprint})" to Ok
         is Hub.Status.Down -> "Offline: ${s.reason} (retry in ${s.retryInSecs}s)" to Danger
+        is Hub.Status.Untrusted -> "New computer: ${s.host}. Not trusted yet." to Warn
+        is Hub.Status.KeyMismatch -> "DIFFERENT computer key from ${s.host}! Not connecting." to Danger
     }
     Text(txt, color = col)
 }
@@ -211,7 +216,7 @@ private fun Detail(act: MainActivity, p: Hub.Pending, onClose: () -> Unit) {
             delay(500)
         }
     }
-    val problems = Checks.problems(r, p.daemonCode, now)
+    val problems = Checks.problems(r, p.daemonCode, now) + DeviceSafety.problems(act)
     val left = (r.expires - now).coerceAtLeast(0)
 
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -246,6 +251,12 @@ private fun Detail(act: MainActivity, p: Hub.Pending, onClose: () -> Unit) {
         Text("Reason given by the requester (NOT verified):", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Warn)
         Text(r.why, modifier = Modifier.fillMaxWidth().border(1.dp, Warn, RoundedCornerShape(6.dp)).padding(8.dp))
 
+        if (p.warnings.isNotEmpty()) {
+            Column(Modifier.fillMaxWidth().background(Color(0x33FF6B6B), RoundedCornerShape(6.dp)).padding(8.dp)) {
+                Text("Warnings from your computer:", color = Danger, fontWeight = FontWeight.Bold)
+                p.warnings.forEach { Text("• $it", color = Danger, fontSize = 13.sp) }
+            }
+        }
         if (problems.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().border(2.dp, Danger, RoundedCornerShape(6.dp)).padding(8.dp)) {
                 Text("Cannot approve:", color = Danger, fontWeight = FontWeight.Bold)
@@ -305,5 +316,56 @@ private fun Background(act: MainActivity) {
         Switch(checked = boot, onCheckedChange = { boot = it; Power.setStartAtBoot(act, it) })
         Spacer(Modifier.width(8.dp))
         Text("Start after reboot", fontSize = 14.sp)
+    }
+}
+
+@Composable
+private fun Trust(act: MainActivity, s: Hub.Status) {
+    when (s) {
+        is Hub.Status.Untrusted -> Column(
+            Modifier.fillMaxWidth().border(2.dp, Warn, RoundedCornerShape(6.dp)).padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("Is this your computer?", fontWeight = FontWeight.Bold)
+            Text("It proved it owns this key:", fontSize = 13.sp)
+            Text(s.fingerprint, fontFamily = Mono, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "On the computer run:  journalctl -u rootgated | grep fingerprint\nTrust only if the fingerprints match exactly.",
+                fontSize = 12.sp,
+                color = Color.Gray,
+            )
+            Button(onClick = {
+                dev.altfurr.rootgate.Settings.pin(act, s.key)
+                ApproverService.start(act, reconnect = true)
+            }) { Text("Fingerprints match: trust") }
+        }
+        is Hub.Status.KeyMismatch -> Column(
+            Modifier.fillMaxWidth().border(2.dp, Danger, RoundedCornerShape(6.dp)).padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("Possible impostor", color = Danger, fontWeight = FontWeight.Bold)
+            Text(
+                "Something at this address answered with a different key (${s.fingerprint}). " +
+                    "Only forget the old key if you reinstalled rootgate on purpose.",
+                fontSize = 13.sp,
+            )
+            TextButton(onClick = {
+                dev.altfurr.rootgate.Settings.forgetPin(act)
+                ApproverService.start(act, reconnect = true)
+            }) { Text("I reinstalled it: forget the old key", color = Danger) }
+        }
+        else -> {}
+    }
+}
+
+@Composable
+private fun SafetyBanner(act: MainActivity) {
+    var problems by remember { mutableStateOf(DeviceSafety.problems(act)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { problems = DeviceSafety.problems(act) }
+    if (problems.isNotEmpty()) {
+        Column(Modifier.fillMaxWidth().border(2.dp, Danger, RoundedCornerShape(6.dp)).padding(10.dp)) {
+            Text("Approving is blocked", color = Danger, fontWeight = FontWeight.Bold)
+            problems.forEach { Text("• $it", color = Danger, fontSize = 13.sp) }
+        }
     }
 }
