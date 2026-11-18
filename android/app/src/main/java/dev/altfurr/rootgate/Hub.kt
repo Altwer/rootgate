@@ -36,10 +36,28 @@ object Hub {
 
     fun attach(o: OutputStream) = synchronized(lock) { out = o }
 
-    fun detach() {
-        synchronized(lock) { out = null }
+    /**
+     * Forget the connection. With [only], only if it is still the current one, so a
+     * dying old connection can't detach a freshly opened new one.
+     */
+    fun detach(only: OutputStream? = null) {
+        synchronized(lock) {
+            if (only != null && out !== only) return
+            out = null
+        }
         // The daemon re-sends everything still pending when we reconnect.
         _pending.value = emptyList()
+    }
+
+    /** Socket writes are not allowed on the main thread; all UI sends go through here. */
+    private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+    fun sendAsync(line: String, done: (Boolean) -> Unit) {
+        io.execute {
+            val ok = send(line)
+            main.post { done(ok) }
+        }
     }
 
     fun upsert(p: Pending) = _pending.update { list -> list.filter { it.req.id != p.req.id } + p }
