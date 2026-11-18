@@ -40,6 +40,10 @@ pub struct Config {
     pub socket_path: PathBuf,
     /// TCP address the phone connects to, e.g. "100.x.y.z:789" (Tailscale IP only).
     pub listen: String,
+    /// Kernel-level: only accept phone connections that arrive on this interface
+    /// (normally "tailscale0"). Strongly recommended.
+    #[serde(default)]
+    pub bind_device: Option<String>,
     /// Only these peer IPs may connect as approvers (your phone's Tailscale IP).
     pub approver_ips: Vec<IpAddr>,
     /// Enrolled phone keys: base64 X.509 SubjectPublicKeyInfo (P-256).
@@ -214,6 +218,9 @@ pub fn start(cfg: Config) -> Result<Handle, String> {
     ul.set_nonblocking(true).map_err(|e| e.to_string())?;
 
     let tl = TcpListener::bind(&cfg.listen).map_err(|e| format!("{}: {e}", cfg.listen))?;
+    if let Some(dev) = &cfg.bind_device {
+        crate::net::bind_to_device(&tl, dev).map_err(|e| format!("bind to device {dev}: {e}"))?;
+    }
     tl.set_nonblocking(true).map_err(|e| e.to_string())?;
     let tcp_addr = tl.local_addr().map_err(|e| e.to_string())?;
 

@@ -23,6 +23,7 @@ fn config(tag: &str) -> Config {
     Config {
         socket_path: dir.join("s.sock"),
         listen: "127.0.0.1:0".into(),
+        bind_device: None,
         approver_ips: vec!["127.0.0.1".parse().unwrap()],
         approver_pubkeys: vec![proto::encode_public_key(phone_key().verifying_key())],
         allowed_uids: vec![unsafe { libc::getuid() }],
