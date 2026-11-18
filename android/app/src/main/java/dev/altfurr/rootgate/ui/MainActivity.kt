@@ -47,7 +47,7 @@ class MainActivity : FragmentActivity() {
         intent.getStringExtra(ApproverService.EXTRA_ID)?.let { openId.value = it }
     }
 
-    fun deny(id: String): Boolean = Hub.send(Protocol.decision(id, false, null))
+    fun deny(id: String, done: (Boolean) -> Unit) = Hub.sendAsync(Protocol.decision(id, false, null), done)
 
     /**
      * Ask for fingerprint/PIN; the Keystore only releases a signature after that.
@@ -77,8 +77,9 @@ class MainActivity : FragmentActivity() {
                     } catch (e: Exception) {
                         return onResult("Signing failed: ${e.message}")
                     }
-                    val sent = Hub.send(Protocol.decision(p.req.id, true, Base64.getEncoder().encodeToString(der)))
-                    onResult(if (sent) null else "Not connected; approval not sent.")
+                    Hub.sendAsync(Protocol.decision(p.req.id, true, Base64.getEncoder().encodeToString(der))) { sent ->
+                        onResult(if (sent) null else "Not connected; approval not sent.")
+                    }
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

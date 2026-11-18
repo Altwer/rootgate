@@ -47,7 +47,10 @@ class ApproverService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
         if (intent?.action == ACTION_RECONNECT) {
-            // Settings changed: drop the current connection; the loop reconnects.
+            // Settings changed: drop the connection and restart the loop now, even if
+            // it is sleeping in a retry back-off.
+            job?.cancel()
+            job = null
             try { socket?.close() } catch (_: IOException) {}
         }
         if (job?.isActive != true) job = scope.launch { loop() }
@@ -68,6 +71,7 @@ class ApproverService : Service() {
             val host = Settings.host(this)
             val port = Settings.port(this)
             Hub.setStatus(Hub.Status.Connecting("$host:$port"))
+            var mine: java.io.OutputStream? = null
             try {
                 Socket().use { s ->
                     socket = s
@@ -76,7 +80,8 @@ class ApproverService : Service() {
                     s.keepAlive = true
                     // Daemon pings every 30 s; 100 s of silence means the link is dead.
                     s.soTimeout = 100_000
-                    Hub.attach(s.getOutputStream())
+                    mine = s.getOutputStream()
+                    Hub.attach(mine!!)
                     val input = BufferedInputStream(s.getInputStream())
                     var greeted = false
                     while (true) {
@@ -105,10 +110,10 @@ class ApproverService : Service() {
                         }
                     }
                 }
-                Hub.detach()
+                Hub.detach(mine)
                 Hub.setStatus(Hub.Status.Down("daemon closed the connection", backoff / 1000))
             } catch (e: Exception) {
-                Hub.detach()
+                Hub.detach(mine)
                 Hub.setStatus(Hub.Status.Down(e.message ?: e.javaClass.simpleName, backoff / 1000))
             } finally {
                 socket = null

@@ -251,7 +251,7 @@ private fun Detail(act: MainActivity, p: Hub.Pending, onClose: () -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = {
-                    result = if (act.deny(r.id)) "Denied" else "Not connected"
+                    act.deny(r.id) { ok -> result = if (ok) "Denied" else "Not connected" }
                 },
                 modifier = Modifier.weight(1f).height(56.dp),
             ) { Text("Deny", color = Danger, fontSize = 18.sp) }
