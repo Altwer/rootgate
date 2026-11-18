@@ -71,11 +71,10 @@ fn still_works(h: &Handle) {
     send_json(&mut cw, &ClientMsg::Submit { argv: vec!["/usr/bin/echo".into(), tag.clone()], why: "health check".into() }).unwrap();
     let req: Request = loop {
         let line = read_line_bounded(&mut pr, 1 << 20).unwrap().expect("phone port closed");
-        if let Ok(ToApprover::Request { request, .. }) = serde_json::from_str(&line) {
-            if request.argv[1] == tag {
+        if let Ok(ToApprover::Request { request, .. }) = serde_json::from_str(&line)
+            && request.argv[1] == tag {
                 break request;
             }
-        }
     };
     let sig = proto::sign_request(&key(), &req);
     send_json(&mut pw, &FromApprover::Decision { id: req.id, approve: true, sig: Some(sig) }).unwrap();
