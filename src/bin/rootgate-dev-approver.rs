@@ -67,8 +67,13 @@ fn main() {
 }
 
 fn connect(sk: SigningKey, addr: &str) {
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
     let s = TcpStream::connect(addr).unwrap_or_else(|e| fail(format!("{addr}: {e}")));
     let w = Arc::new(Mutex::new(s.try_clone().unwrap_or_else(|e| fail(e.to_string()))));
+    let challenge = B64.encode(rootgate::random_bytes::<32>());
+    send(&w, &FromApprover::Hello { challenge: challenge.clone() });
+    // Pin the daemon key from the first hello (a real phone stores it).
+    let mut daemon: Option<p256::ecdsa::VerifyingKey> = None;
 
     // Reader thread answers pings itself so the daemon doesn't drop us while
     // we are waiting at a prompt; everything else goes to the main thread.
@@ -96,11 +101,23 @@ fn connect(sk: SigningKey, addr: &str) {
     let stdin = io::stdin();
     for msg in rx {
         match msg {
-            ToApprover::Hello { host, proto } => println!("connected to {host} (protocol {proto})"),
+            ToApprover::Hello { host, proto, daemon_key, sig } => {
+                let vk = proto::parse_public_key(&daemon_key).unwrap_or_else(|e| fail(e));
+                if !proto::verify_approval(&[vk], &proto::hello_bytes(&challenge, &host, &daemon_key), &sig) {
+                    fail("daemon failed the challenge: not the real daemon");
+                }
+                println!("connected to {host} (protocol {proto}), daemon fingerprint {}", proto::fingerprint(&vk));
+                daemon = Some(vk);
+            }
             ToApprover::Cancel { id, reason } => println!("[{}] {reason}", &id[..8.min(id.len())]),
             ToApprover::Error { id, message } => println!("error{}: {message}", id.map(|i| format!(" [{}]", &i[..8.min(i.len())])).unwrap_or_default()),
             ToApprover::Ping => {}
-            ToApprover::Request { request, code } => {
+            ToApprover::Request { request, code, warnings, dsig } => {
+                let Some(vk) = daemon else { fail("request before hello") };
+                if !proto::verify_approval(&[vk], &proto::daemon_request_bytes(&request, &warnings), &dsig) {
+                    println!("!!! request not signed by the daemon, ignoring");
+                    continue;
+                }
                 // Recompute the code locally: what we show and sign must be what we got.
                 let local = request.code();
                 println!("\n=== root request {code} from {}@{} ===", request.user, request.host);
@@ -113,6 +130,9 @@ fn connect(sk: SigningKey, addr: &str) {
                     println!("  argv[{i}] = {}", serde_json::to_string(a).unwrap_or_default());
                 }
                 println!("  why: {}", request.why);
+                for w in &warnings {
+                    println!("  WARNING: {w}");
+                }
                 let left = request.expires.saturating_sub(rootgate::now_unix());
                 print!("approve? type the code to approve, anything else denies ({left}s left): ");
                 let _ = io::stdout().flush();

@@ -35,20 +35,40 @@ fn config(tag: &str) -> Config {
         max_clients: 16,
         ping_secs: 30,
         require_trusted_exe: true,
+        daemon_key_path: dir.join("daemon.key"),
+        allow_non_ascii_args: false,
     }
 }
 
 struct Phone {
     r: BufReader<TcpStream>,
     w: TcpStream,
+    daemon_key: String,
+    last_warnings: Vec<String>,
 }
+/// Phone side of the v2 handshake: send a challenge, check the daemon's answer.
+fn phone_hello(w: &mut TcpStream) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    let challenge = B64.encode(rootgate::random_bytes::<32>());
+    send_json(w, &FromApprover::Hello { challenge: challenge.clone() }).unwrap();
+    challenge
+}
+
 
 impl Phone {
     fn connect(h: &Handle) -> Phone {
         let s = TcpStream::connect(h.tcp_addr).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut p = Phone { w: s.try_clone().unwrap(), r: BufReader::new(s) };
-        assert!(matches!(p.recv(), ToApprover::Hello { proto: 1, .. }));
+        let mut p = Phone { w: s.try_clone().unwrap(), r: BufReader::new(s), daemon_key: h.daemon_key.clone(), last_warnings: vec![] };
+        let challenge = phone_hello(&mut p.w);
+        match p.recv() {
+            ToApprover::Hello { host, proto: 2, daemon_key, sig } => {
+                assert_eq!(daemon_key, h.daemon_key, "daemon must present its pinned key");
+                let vk = proto::parse_public_key(&daemon_key).unwrap();
+                assert!(proto::verify_approval(&[vk], &proto::hello_bytes(&challenge, &host, &daemon_key), &sig));
+            }
+            other => panic!("expected hello, got {other:?}"),
+        }
         p
     }
     fn recv(&mut self) -> ToApprover {
@@ -58,7 +78,15 @@ impl Phone {
     fn next_request(&mut self) -> (Request, String) {
         loop {
             match self.recv() {
-                ToApprover::Request { request, code } => return (request, code),
+                ToApprover::Request { request, code, warnings, dsig } => {
+                    let vk = proto::parse_public_key(&self.daemon_key).unwrap();
+                    assert!(
+                        proto::verify_approval(&[vk], &proto::daemon_request_bytes(&request, &warnings), &dsig),
+                        "request not signed by daemon"
+                    );
+                    self.last_warnings = warnings;
+                    return (request, code);
+                }
                 ToApprover::Ping => {}
                 other => panic!("expected request, got {other:?}"),
             }
@@ -340,4 +368,65 @@ fn shutdown_removes_socket() {
     assert!(p.exists());
     h.shutdown();
     assert!(!p.exists());
+}
+
+#[test]
+fn daemon_key_persists_and_impostor_is_detected() {
+    // Same key file -> same identity across restarts.
+    let cfg = config("ident");
+    let key_path = cfg.daemon_key_path.clone();
+    let h = start(cfg.clone());
+    let first = h.daemon_key.clone();
+    h.shutdown();
+    let mut cfg2 = cfg.clone();
+    cfg2.socket_path = cfg.socket_path.with_extension("2");
+    let h2 = start(cfg2);
+    assert_eq!(h2.daemon_key, first);
+    h2.shutdown();
+    // A different daemon (copied code, pasted phone key) has a different identity.
+    let impostor = start(config("impostor"));
+    assert_ne!(impostor.daemon_key, first, "an impostor must not share the identity");
+    // Its answer to our challenge does not verify against the pinned key.
+    let s = TcpStream::connect(impostor.tcp_addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut w = s.try_clone().unwrap();
+    let mut r = BufReader::new(s);
+    let challenge = phone_hello(&mut w);
+    let line = read_line_bounded(&mut r, 1 << 16).unwrap().unwrap();
+    let ToApprover::Hello { host, sig, .. } = serde_json::from_str(&line).unwrap() else { panic!() };
+    let pinned = proto::parse_public_key(&first).unwrap();
+    assert!(!proto::verify_approval(&[pinned], &proto::hello_bytes(&challenge, &host, &first), &sig));
+    impostor.shutdown();
+    assert!(key_path.exists());
+}
+
+#[test]
+fn non_ascii_args_refused_and_warnings_sent() {
+    let h = start(config("ascii"));
+    let mut c = Client::submit(&h, &[echo(), "1\u{041E}\u{041E}.0.0.1"], "cyrillic O");
+    assert!(matches!(c.recv(), ToClient::Error { message } if message.contains("non-ASCII")));
+    let mut c = Client::submit(&h, &[echo(), "a\u{3164}b"], "hangul filler");
+    assert!(matches!(c.recv(), ToClient::Error { .. }));
+    // Czech in the reason is fine.
+    let mut phone = Phone::connect(&h);
+    let mut c = Client::submit(&h, &["/usr/bin/sh", "-c", "id"], "česky: spustit shell");
+    c.pending();
+    let (req, _) = phone.next_request();
+    assert_eq!(phone.last_warnings.len(), 1, "{:?}", phone.last_warnings);
+    phone.send(&FromApprover::Decision { id: req.id, approve: false, sig: None });
+    assert!(matches!(c.recv(), ToClient::Denied { .. }));
+    h.shutdown();
+}
+
+#[test]
+fn phone_that_skips_the_challenge_gets_nothing() {
+    let h = start(config("nochal"));
+    let mut c = Client::submit(&h, &[echo(), "secret-ish"], "should not leak");
+    c.pending();
+    let s = TcpStream::connect(h.tcp_addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    let mut r = BufReader::new(s);
+    // Never sends hello: must be dropped without seeing the pending request.
+    assert!(matches!(read_line_bounded(&mut r, 1 << 16), Ok(None) | Err(_)));
+    h.shutdown();
 }

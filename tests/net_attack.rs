@@ -39,7 +39,17 @@ fn config(tag: &str) -> Config {
         max_clients: 16,
         ping_secs: 30,
         require_trusted_exe: true,
+        daemon_key_path: dir.join("daemon.key"),
+        allow_non_ascii_args: false,
     }
+}
+
+/// Phone side of the v2 handshake: send a challenge, check the daemon's answer.
+fn phone_hello(w: &mut TcpStream) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    let challenge = B64.encode(rootgate::random_bytes::<32>());
+    send_json(w, &FromApprover::Hello { challenge: challenge.clone() }).unwrap();
+    challenge
 }
 
 fn threads() -> usize {
@@ -63,6 +73,7 @@ fn still_works(h: &Handle) {
     let s = connect(h);
     let mut pw = s.try_clone().unwrap();
     let mut pr = BufReader::new(s);
+    phone_hello(&mut pw);
     let tag = rootgate::hex(&rootgate::random_bytes::<4>());
     let c = UnixStream::connect(&h.socket_path).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -120,7 +131,8 @@ fn approver_slots_are_capped() {
     let mut greeted = 0;
     let mut keep = Vec::new();
     for _ in 0..20 {
-        let s = connect(&h);
+        let mut s = connect(&h);
+        phone_hello(&mut s);
         let mut r = BufReader::new(s.try_clone().unwrap());
         match read_line_bounded(&mut r, 4096) {
             Ok(Some(l)) if l.contains("hello") => {
@@ -184,6 +196,7 @@ fn oversized_line_is_cut_off() {
     let _g = serial();
     let h = daemon::start(config("big")).unwrap();
     let mut s = connect(&h);
+    phone_hello(&mut s);
     let mut r = BufReader::new(s.try_clone().unwrap());
     assert!(read_line_bounded(&mut r, 4096).unwrap().unwrap().contains("hello"));
     let chunk = vec![b'x'; 64 * 1024];
@@ -209,8 +222,9 @@ fn silent_phone_is_dropped_and_slot_freed() {
     cfg.ping_secs = 1; // read timeout = 3*1+5 = 8 s
     cfg.max_approvers = 1;
     let h = daemon::start(cfg).unwrap();
-    let s = TcpStream::connect(h.tcp_addr).unwrap();
+    let mut s = TcpStream::connect(h.tcp_addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    phone_hello(&mut s);
     let start = Instant::now();
     let mut r = BufReader::new(s);
     // Read pings but never answer: daemon must hang up.
@@ -227,7 +241,8 @@ fn phone_that_stops_reading_cannot_stall_the_daemon() {
     let _g = serial();
     let h = daemon::start(config("stall")).unwrap();
     // A connected approver that never reads.
-    let stuck = connect(&h);
+    let mut stuck = connect(&h);
+    phone_hello(&mut stuck);
     std::thread::sleep(Duration::from_millis(200));
     let big_arg = "y".repeat(4000);
     let start = Instant::now();

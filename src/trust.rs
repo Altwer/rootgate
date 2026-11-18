@@ -36,6 +36,15 @@ fn push_components(q: &mut VecDeque<OsString>, p: &Path) {
 /// Resolve `path` step by step and check each step is root-controlled.
 /// Returns the fully resolved path of the executable.
 pub fn resolve_trusted_exe(path: &str) -> Result<PathBuf, String> {
+    resolve_trusted(path, true)
+}
+
+/// Same walk for any regular file (no exec bit needed): scripts, packages, configs.
+pub fn resolve_trusted_file(path: &str) -> Result<PathBuf, String> {
+    resolve_trusted(path, false)
+}
+
+fn resolve_trusted(path: &str, need_exec: bool) -> Result<PathBuf, String> {
     let p = Path::new(path);
     if !p.is_absolute() {
         return Err("path must be absolute".into());
@@ -82,7 +91,7 @@ pub fn resolve_trusted_exe(path: &str) -> Result<PathBuf, String> {
             if !lmeta.file_type().is_file() {
                 return Err(format!("{} is not a regular file", next.display()));
             }
-            if lmeta.mode() & 0o111 == 0 {
+            if need_exec && lmeta.mode() & 0o111 == 0 {
                 return Err(format!("{} is not executable", next.display()));
             }
             return Ok(next);
@@ -93,6 +102,64 @@ pub fn resolve_trusted_exe(path: &str) -> Result<PathBuf, String> {
         cur = next;
     }
     Err(format!("{path} resolves to a directory"))
+}
+
+/// Programs whose job is to run *other* code given in their arguments. Approving
+/// them means approving whatever that code is, so the phone gets a red warning.
+const LAUNCHERS: &[&str] = &[
+    "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh", "busybox", "env", "sudo", "su",
+    "pkexec", "doas", "runuser", "setpriv", "nohup", "nice", "ionice", "timeout", "chroot",
+    "flock", "setsid", "stdbuf", "unshare", "nsenter", "systemd-run", "find", "xargs",
+    "parallel", "watch", "script", "expect", "python", "python2", "python3", "perl", "ruby",
+    "node", "nodejs", "php", "lua", "tclsh", "awk", "gawk", "mawk", "sed", "make", "dpkg",
+    "apt", "apt-get", "snap", "flatpak", "docker", "podman", "crontab", "at", "tmux", "screen",
+    "ssh", "rsync", "git", "vim", "vi", "nvim", "nano", "less", "more", "man",
+];
+
+/// Human-readable warnings for the phone. Never blocks: the user decides.
+pub fn warnings(argv: &[String]) -> Vec<String> {
+    let mut w = Vec::new();
+    let name = argv[0].rsplit('/').next().unwrap_or("");
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if LAUNCHERS.contains(&name) || LAUNCHERS.contains(&base) {
+        w.push(format!(
+            "{name} can run other programs or code given in its arguments. Read every argument: that is what you are approving."
+        ));
+    }
+    for (i, a) in argv.iter().enumerate().skip(1) {
+        // Commands run with cwd "/", so relative paths resolve from there.
+        let candidate = if a.starts_with('/') {
+            a.clone()
+        } else if a.contains('/') && !a.contains("://") {
+            format!("/{a}")
+        } else {
+            continue;
+        };
+        let p = Path::new(&candidate);
+        if !p.exists() {
+            continue;
+        }
+        if p.is_dir() {
+            if let Err(e) = check_dir_chain(p) {
+                w.push(format!("argv[{i}] is a folder a normal user can change ({e})."));
+            }
+        } else if let Err(e) = resolve_trusted_file(&candidate) {
+            w.push(format!(
+                "argv[{i}] is a file a normal user can change ({e}). Its contents can differ from what you reviewed."
+            ));
+        }
+    }
+    w
+}
+
+fn check_dir_chain(p: &Path) -> Result<(), String> {
+    let real = fs::canonicalize(p).map_err(|e| e.to_string())?;
+    let mut cur = Some(real.as_path());
+    while let Some(d) = cur {
+        root_only(&fs::metadata(d).map_err(|e| e.to_string())?, d)?;
+        cur = d.parent();
+    }
+    Ok(())
 }
 
 /// Check a config file the daemon trusts (it lists the approver keys).
@@ -146,6 +213,31 @@ mod tests {
         assert!(resolve_trusted_exe("/usr/bin/definitely-not-here-123").is_err());
         assert!(resolve_trusted_exe("/etc/hostname").is_err()); // not executable
         assert!(resolve_trusted_exe("relative").is_err());
+    }
+
+    #[test]
+    fn warnings_flag_launchers_and_user_files() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(warnings(&v(&["/usr/sbin/ufw", "status"])).is_empty());
+        assert!(warnings(&v(&["/usr/bin/id", "-u"])).is_empty());
+        assert_eq!(warnings(&v(&["/usr/bin/sh", "-c", "id"])).len(), 1);
+        assert_eq!(warnings(&v(&["/usr/bin/python3.12", "-c", "1"])).len(), 1);
+        assert_eq!(warnings(&v(&["/usr/bin/env", "id"])).len(), 1);
+        // A root-owned file argument is fine.
+        assert!(warnings(&v(&["/usr/bin/cat", "/etc/hostname"])).is_empty());
+        // A user-owned script/file is flagged.
+        let dir = std::env::temp_dir().join(format!("rootgate-warn-{}", crate::hex(&crate::random_bytes::<4>())));
+        fs::create_dir(&dir).unwrap();
+        let f = dir.join("x.sh");
+        fs::write(&f, "id").unwrap();
+        let w = warnings(&v(&["/usr/bin/cat", f.to_str().unwrap()]));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("argv[1]"));
+        // A user-owned folder too (e.g. install target dir).
+        assert_eq!(warnings(&v(&["/usr/bin/ls", dir.to_str().unwrap()])).len(), 1);
+        // /tmp is world-writable.
+        assert_eq!(warnings(&v(&["/usr/bin/ls", "/tmp"])).len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
