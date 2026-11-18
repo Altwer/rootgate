@@ -306,11 +306,10 @@ fn handle_client(d: &Arc<Daemon>, s: UnixStream) -> io::Result<()> {
     if let Err(e) = proto::validate_argv(&argv).and_then(|_| proto::validate_why(&why)) {
         return reply_err(&mut w, e);
     }
-    if d.cfg.require_trusted_exe {
-        if let Err(e) = trust::resolve_trusted_exe(&argv[0]) {
+    if d.cfg.require_trusted_exe
+        && let Err(e) = trust::resolve_trusted_exe(&argv[0]) {
             return reply_err(&mut w, format!("refusing untrusted executable: {e}"));
         }
-    }
 
     let now = crate::now_unix();
     let req = Request {

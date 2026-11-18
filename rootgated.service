@@ -1,0 +1,19 @@
+[Unit]
+Description=rootgate: run root commands only after approval on the phone
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+ExecStart=/usr/local/sbin/rootgated /etc/rootgate/config.json
+# Creates /run/rootgate for the socket.
+RuntimeDirectory=rootgate
+RuntimeDirectoryMode=0755
+# The Tailscale IP may not exist yet right after boot; keep retrying.
+Restart=always
+RestartSec=5
+# Logs (every request, decision and result) go to the journal:
+#   journalctl -u rootgated
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
