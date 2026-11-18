@@ -144,6 +144,7 @@ class ApproverService : Service() {
                                 }
                             }
                             is FromDaemon.Cancel -> {
+                                Hub.find(msg.id)?.let { History.record(this, it.req, msg.reason) }
                                 Hub.remove(msg.id)
                                 nm(this).cancel(notifId(msg.id))
                             }

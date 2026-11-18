@@ -16,7 +16,7 @@
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:label="RootGate"
+        android:label="@string/app_name"
         android:icon="@drawable/ic_shield"
         android:roundIcon="@drawable/ic_shield"
         android:supportsRtl="true"
