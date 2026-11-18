@@ -67,7 +67,7 @@ fn no_growth_over_many_cycles() {
     };
     let h = daemon::start(cfg).unwrap();
 
-    let mut cycle = |i: usize| {
+    let cycle = |i: usize| {
         // A fresh phone connection every 10 cycles exercises connect/disconnect.
         let s = TcpStream::connect(h.tcp_addr).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();

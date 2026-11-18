@@ -1,0 +1,9 @@
+{
+  "socket_path": "/run/rootgate/rootgate.sock",
+  "listen": "100.x.y.z:789",
+  "approver_ips": ["YOUR_PHONE_TAILSCALE_IP"],
+  "approver_pubkeys": ["PASTE_THE_PHONE_PUBLIC_KEY_HERE"],
+  "allowed_uids": [1000],
+  "request_ttl_secs": 120,
+  "exec_timeout_secs": 600
+}
