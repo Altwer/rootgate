@@ -40,3 +40,7 @@ Done. Try `ask-root --why test -- /usr/bin/id`.
 
 For the protocol, security details and the release build of the app, see
 [docs/DETAILS.md](docs/DETAILS.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
