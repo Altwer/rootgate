@@ -1,24 +1,42 @@
 #!/bin/bash
 # Install rootgate as a root service.
+#   cp rootgate.env.example rootgate.env   # fill in your values
 #   cargo build --release
-#   sudo ./install.sh "<phone public key>" <phone tailscale ip> [uid]
+#   sudo ./install.sh
+# Values can also be given as arguments, which override rootgate.env:
+#   sudo ./install.sh [--new-config] ["<phone public key>" <phone tailscale ip> [uid]]
 # Safe to re-run: binaries and unit are replaced, an existing config is kept
 # unless you pass --new-config as the first argument.
 set -euo pipefail
 
-NEW_CONFIG=0
-if [[ "${1:-}" == "--new-config" ]]; then NEW_CONFIG=1; shift; fi
-PUBKEY="${1:?usage: sudo ./install.sh [--new-config] \"<phone public key>\" <phone tailscale ip> [uid]}"
-PHONE_IP="${2:?phone tailscale ip missing}"
-ALLOW_UID="${3:-${SUDO_UID:-1000}}"
-
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
 cd "$(dirname "$0")"
+
+# rootgate.env is read as plain KEY=value lines, never executed.
+PHONE_PUBKEY="" PHONE_IP="" COMPUTER_IP="" ALLOWED_UID=""
+if [[ -f rootgate.env ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    [[ "$line" =~ ^[[:space:]]*([A-Z_]+)[[:space:]]*=[[:space:]]*\"?([^\"[:space:]]*)\"?[[:space:]]*$ ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      PHONE_PUBKEY|PHONE_IP|COMPUTER_IP|ALLOWED_UID) printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}" ;;
+    esac
+  done < rootgate.env
+fi
+
+NEW_CONFIG=0
+if [[ "${1:-}" == "--new-config" ]]; then NEW_CONFIG=1; shift; fi
+PUBKEY="${1:-$PHONE_PUBKEY}"
+PHONE_IP="${2:-$PHONE_IP}"
+ALLOW_UID="${3:-${ALLOWED_UID:-${SUDO_UID:-1000}}}"
+[[ -n "$PUBKEY" && -n "$PHONE_IP" ]] || { echo "set PHONE_PUBKEY and PHONE_IP in rootgate.env (see rootgate.env.example)"; exit 1; }
+
 [[ -x target/release/rootgated && -x target/release/ask-root ]] || { echo "build first: cargo build --release"; exit 1; }
 [[ "$PUBKEY" =~ ^[A-Za-z0-9+/=]{80,200}$ ]] || { echo "that does not look like a base64 public key"; exit 1; }
 [[ "$PHONE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || { echo "phone ip must be a Tailscale 100.x.y.z address"; exit 1; }
-LISTEN_IP="$(tailscale ip -4 | head -1)"
-[[ -n "$LISTEN_IP" ]] || { echo "tailscale has no IPv4 address; is it up?"; exit 1; }
+[[ "$ALLOW_UID" =~ ^[0-9]+$ ]] || { echo "ALLOWED_UID must be a number"; exit 1; }
+LISTEN_IP="${COMPUTER_IP:-$(tailscale ip -4 | head -1)}"
+[[ "$LISTEN_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || { echo "computer ip must be a Tailscale 100.x.y.z address; is tailscale up?"; exit 1; }
 
 echo "== binaries"
 install -o root -g root -m 0755 target/release/rootgated /usr/local/sbin/rootgated
