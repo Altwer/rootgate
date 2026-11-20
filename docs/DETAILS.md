@@ -115,8 +115,9 @@ into `approver_pubkeys`.
 ## Network hardening (tested in `tests/net_attack.rs` and live)
 
 - `bind_device: "tailscale0"` pins the listener to the Tailscale interface in the kernel.
-  Needed when another network (e.g. some Wi-Fi) hands out 100.64.0.0/10 addresses (same range as
-  Tailscale), or when Tailscale's own filtering is off (`--netfilter-mode=off`). Live check:
+  Needed when another network (some Wi-Fi does this) hands out 100.64.0.0/10 addresses
+  (same range as Tailscale), or when Tailscale's own filtering is off
+  (`--netfilter-mode=off`). Live check:
   connections via Wi-Fi and localhost are refused; the listener shows as
   `<computer-tailscale-ip>%tailscale0:789`.
 - Unknown source IPs get closed immediately with zero bytes sent and no thread spawned
