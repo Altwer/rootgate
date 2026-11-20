@@ -39,7 +39,9 @@ Commands run with a clean environment (`PATH`, `LANG`, `HOME` only), cwd `/`, no
 (use `-y` style flags), 10-minute timeout, output capped at 1 MiB per stream. Anything
 left running in the background after the command exits is killed after 2 seconds.
 
-## Install (after the phone app exists)
+## Install by hand
+
+The README way (`rootgate.env` + `sudo ./install.sh`) does all of this for you. By hand:
 
 ```
 cargo build --release

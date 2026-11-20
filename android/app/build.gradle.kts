@@ -5,6 +5,18 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Same settings file as install.sh: ../rootgate.env (see rootgate.env.example).
+val rootgateEnv: Map<String, String> = rootDir.parentFile.resolve("rootgate.env").let { f ->
+    if (!f.exists()) emptyMap() else f.readLines()
+        .map { it.substringBefore('#').trim() }
+        .filter { '=' in it }
+        .associate { it.substringBefore('=').trim() to it.substringAfter('=').trim().trim('"') }
+}
+val computerIp = rootgateEnv["COMPUTER_IP"].orEmpty()
+require(computerIp.isEmpty() || Regex("""100\.\d{1,3}\.\d{1,3}\.\d{1,3}""").matches(computerIp)) {
+    "COMPUTER_IP in rootgate.env must be a Tailscale 100.x.y.z address"
+}
+
 android {
     namespace = "dev.altfurr.rootgate"
     compileSdk = 35
@@ -16,6 +28,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // Pre-filled computer address; empty means "enter it in Settings".
+        buildConfigField("String", "DEFAULT_HOST", "\"$computerIp\"")
     }
 
     buildTypes {

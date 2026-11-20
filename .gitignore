@@ -1,1 +1,4 @@
 /target
+
+# Your own settings (see rootgate.env.example)
+/rootgate.env

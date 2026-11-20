@@ -95,8 +95,8 @@ object Hub {
 /** Where the daemon is, and which daemon key we trust. */
 object Settings {
     private const val PREFS = "rootgate"
-    /** Empty until the user enters the computer's Tailscale IP in Settings. */
-    const val DEFAULT_HOST = ""
+    /** COMPUTER_IP from rootgate.env at build time; empty means "enter it in Settings". */
+    val DEFAULT_HOST: String = BuildConfig.DEFAULT_HOST
     /** Below 1024: only root can listen there on the computer. */
     const val DEFAULT_PORT = 789
 

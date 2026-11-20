@@ -22,14 +22,28 @@ ask-root --why "check the firewall" -- /usr/sbin/ufw status
 You need Rust, Tailscale on the computer and the phone, and the rootgate Android app
 (in `android/`).
 
-1. Build:
+1. Fill in your settings. Everything machine-specific (IPs, phone key, user id) lives
+   in one file, `rootgate.env`, which git ignores:
+   ```
+   cp rootgate.env.example rootgate.env
+   ```
+   | Setting        | What it is                                   | Where to find it    |
+   |----------------|----------------------------------------------|---------------------|
+   | `COMPUTER_IP`  | this computer's Tailscale IP (optional)      | `tailscale ip -4`   |
+   | `PHONE_IP`     | the phone's Tailscale IP                     | Tailscale app       |
+   | `PHONE_PUBKEY` | the phone's approval key                     | rootgate app        |
+   | `ALLOWED_UID`  | the user allowed to run `ask-root` (optional)| `id -u`             |
+
+   Fill in `COMPUTER_IP` before building the app so it is pre-filled there; get
+   `PHONE_PUBKEY` from the app after installing it.
+2. Build the daemon, and the app from `android/` (see [docs/DETAILS.md](docs/DETAILS.md)
+   for a release build), and install the app on your phone:
    ```
    cargo build --release
    ```
-2. Install the app on your phone and copy its public key.
-3. Install the service (pass the phone's key and its Tailscale IP):
+3. Install the service:
    ```
-   sudo ./install.sh "<phone public key>" <phone tailscale ip>
+   sudo ./install.sh
    ```
 4. Open the app and trust the computer if the fingerprint matches:
    ```
