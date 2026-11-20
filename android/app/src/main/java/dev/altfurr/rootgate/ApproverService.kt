@@ -70,6 +70,12 @@ class ApproverService : Service() {
         while (scope.isActive) {
             val host = Settings.host(this)
             val port = Settings.port(this)
+            if (host.isBlank()) {
+                Hub.setStatus(Hub.Status.Down("Enter the computer's Tailscale IP in Settings", backoff / 1000))
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000L)
+                continue
+            }
             Hub.setStatus(Hub.Status.Connecting("$host:$port"))
             var mine: java.io.OutputStream? = null
             if (!DeviceSafety.vpnUp(this)) {
