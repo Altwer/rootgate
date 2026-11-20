@@ -19,8 +19,10 @@ ask-root --why "check the firewall" -- /usr/sbin/ufw status
 
 ## Install
 
-You need Rust, Tailscale on the computer and the phone, and the rootgate Android app
-(in `android/`).
+You need Linux, Android and Tailscale on both. The easiest way is a
+[release](../../releases): a Linux archive for your CPU (`x86_64` or `aarch64`) and the
+APK. Unpack the archive and run the steps below inside it, skipping the build.
+Building from source needs Rust and the Android SDK.
 
 1. Fill in your settings. Everything machine-specific (IPs, phone key, user id) lives
    in one file, `rootgate.env`, which git ignores:
@@ -36,7 +38,7 @@ You need Rust, Tailscale on the computer and the phone, and the rootgate Android
 
    Fill in `COMPUTER_IP` before building the app so it is pre-filled there; get
    `PHONE_PUBKEY` from the app after installing it.
-2. Build the daemon, and the app from `android/` (see [docs/DETAILS.md](docs/DETAILS.md)
+2. (From source only) Build the daemon, and the app from `android/` (see [docs/DETAILS.md](docs/DETAILS.md)
    for a release build), and install the app on your phone:
    ```
    cargo build --release

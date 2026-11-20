@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install rootgate as a root service.
 #   cp rootgate.env.example rootgate.env   # fill in your values
-#   cargo build --release
+#   cargo build --release     # or unpack a release archive and skip this
 #   sudo ./install.sh
 # Values can also be given as arguments, which override rootgate.env:
 #   sudo ./install.sh [--new-config] ["<phone public key>" <phone tailscale ip> [uid]]
@@ -31,7 +31,10 @@ PHONE_IP="${2:-$PHONE_IP}"
 ALLOW_UID="${3:-${ALLOWED_UID:-${SUDO_UID:-1000}}}"
 [[ -n "$PUBKEY" && -n "$PHONE_IP" ]] || { echo "set PHONE_PUBKEY and PHONE_IP in rootgate.env (see rootgate.env.example)"; exit 1; }
 
-[[ -x target/release/rootgated && -x target/release/ask-root ]] || { echo "build first: cargo build --release"; exit 1; }
+# Built from source (target/release) or unpacked from a release archive (next to this script).
+if [[ -x target/release/rootgated && -x target/release/ask-root ]]; then BIN=target/release
+elif [[ -x rootgated && -x ask-root ]]; then BIN=.
+else echo "build first: cargo build --release"; exit 1; fi
 [[ "$PUBKEY" =~ ^[A-Za-z0-9+/=]{80,200}$ ]] || { echo "that does not look like a base64 public key"; exit 1; }
 [[ "$PHONE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || { echo "phone ip must be a Tailscale 100.x.y.z address"; exit 1; }
 [[ "$ALLOW_UID" =~ ^[0-9]+$ ]] || { echo "ALLOWED_UID must be a number"; exit 1; }
@@ -39,8 +42,8 @@ LISTEN_IP="${COMPUTER_IP:-$(tailscale ip -4 | head -1)}"
 [[ "$LISTEN_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || { echo "computer ip must be a Tailscale 100.x.y.z address; is tailscale up?"; exit 1; }
 
 echo "== binaries"
-install -o root -g root -m 0755 target/release/rootgated /usr/local/sbin/rootgated
-install -o root -g root -m 0755 target/release/ask-root /usr/local/bin/ask-root
+install -o root -g root -m 0755 "$BIN/rootgated" /usr/local/sbin/rootgated
+install -o root -g root -m 0755 "$BIN/ask-root" /usr/local/bin/ask-root
 
 echo "== config"
 install -d -o root -g root -m 0755 /etc/rootgate
