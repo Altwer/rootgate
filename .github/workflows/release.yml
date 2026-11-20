@@ -1,6 +1,8 @@
 # Builds rootgate and publishes a GitHub release.
 #
 #   git tag v0.1.0 && git push origin v0.1.0   -> tests, builds, creates release v0.1.0
+#   or on github.com: Releases -> Draft a new release -> new tag v0.1.0 -> Publish
+#                                               -> same, files are added to that release
 #   Actions tab -> Release -> Run workflow     -> tests and builds only (files under the run's Artifacts)
 #
 # APK signing (optional): add these repository secrets to get a signed, installable APK.
@@ -138,6 +140,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A release made on github.com (which creates the tag) just gets the files added.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "rootgate $GITHUB_REF_NAME" \
